@@ -11,6 +11,9 @@ Date: 01/12/2026
 Reference:
     This code accompanies the manuscript titled:
     "Unified Multi-Site Multi-Sequence Brain MRI Harmonization Enriched by Biomedical Semantic Style" (Under Review)
+		
+	Please cite the preprint if you use this code: 
+	https://doi.org/10.48550/arXiv.2601.08193
 
 License: MIT License (see LICENSE file for details)
 """
