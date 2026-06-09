@@ -15,7 +15,7 @@ Reference:
 	Please cite the preprint if you use this code: 
 	https://doi.org/10.48550/arXiv.2601.08193
 
-License: MIT License (see LICENSE file for details)
+License: Apache-2.0 License (see LICENSE file for details)
 """
 
 import numpy as np
@@ -95,6 +95,101 @@ class MRIdata_3d_t1t2(Dataset):
 
 		return example
 
+
+
+class MRI_nii_Dataset_3D(Dataset):
+	def __init__(self, data_root_dir: str, df, transform=None, transform_mask=None, image_min=-1.0, absolute_path=True):
+		self.data_root_dir = Path(data_root_dir) # paths to the data directories of each dataset
+		self.df = df
+		self.image_min = image_min
+		self.absolute_path = absolute_path
+		if (transform is not None) and (transform_mask is not None):
+			self.transform = transform
+			self.mask_transform = transform_mask
+		else:
+			self.transform = tr.Compose([
+				tr.SpatialPad(spatial_size=(184, 184, 184)),
+				# tr.CenterSpatialCrop(roi_size=(184, 184, 184)),
+				tr.CenterSpatialCrop(roi_size=(144, 184, 184)),
+
+				tr.ScaleIntensityRangePercentiles(
+					lower=0, upper=99.5, b_min=image_min, b_max=1.0, clip=True
+				),
+				tr.ToTensor(),
+			])
+			
+
+			self.mask_transform = tr.Compose([
+				tr.SpatialPad(spatial_size=(184, 184, 184)),
+				# tr.CenterSpatialCrop(roi_size=(184, 184, 184)),
+				tr.CenterSpatialCrop(roi_size=(144, 184, 184)),
+				tr.ToTensor(),
+			])
+
+
+
+	def __len__(self):
+		return len(self.df)
+
+
+	def __getitem__(self, idx):
+		dataset_root = self.data_root_dir 
+
+		if self.absolute_path:
+			scan_path = dataset_root / self.df.iloc[idx]['ImageFilePath']
+			mask_path = dataset_root / self.df.iloc[idx]['MaskFilePath']
+		else:
+			scan_path = dataset_root / f"{Path(self.df.iloc[idx]['ImageFilePath']).name.replace('.nii.gz','.npy')}"
+			mask_path = dataset_root / f"{Path(self.df.iloc[idx]['MaskFilePath']).name.replace('.nii.gz','.npy')}"
+
+		group = self.df.iloc[idx]['ResearchGroup']
+		subject = self.df.iloc[idx]['SubjectID']
+		class_emb = torch.tensor(0).int()
+		fn = scan_path.name.replace('.nii.gz','')
+	 
+		try:
+			scan =  torch.from_numpy(nib.load(str(scan_path)).get_fdata(dtype=np.float32))  # Load as float32 for better precision during transforms
+			# org_scan = scan.clone()  # Keep original for debugging
+		except FileNotFoundError as e:
+			print(f"[NIFTI-LOAD-ERROR] Missing file: {scan_path}")
+			raise e
+		except (ImageFileError, OSError, EOFError, ValueError) as e:
+			print(f"[NIFTI-LOAD-ERROR] Not loadable by nibabel (expected .nii/.nii.gz): {scan_path}")
+			print(f"[NIFTI-LOAD-ERROR] {type(e).__name__}: {e}")
+			raise e       
+	   
+		# print(f"Original scan shape: {scan.shape}")
+		# print(f"Original mean intensity: {scan.mean():.4f}, std intensity: {scan.std():.4f}, min intensity: {scan.min():.4f}, max intensity: {scan.max():.4f}")
+		scan = self.transform(scan.unsqueeze(0)).clamp(self.image_min,1).float()  # Add channel dimension for MONAI transforms
+		# print(f"Transformed scan shape: {scan.shape}")
+		# print(f"Transformed mean intensity: {scan.mean():.4f}, std intensity: {scan.std():.4f}, min intensity: {scan.min():.4f}, max intensity: {scan.max():.4f}")
+
+		try:
+			mask_file = torch.from_numpy(nib.load(str(mask_path)).get_fdata(dtype=np.float32))
+		except FileNotFoundError as e:
+			print(f"[NIFTI-LOAD-ERROR] Missing file: {mask_path}")
+			raise e
+		except (ImageFileError, OSError, EOFError, ValueError) as e:
+			print(f"[NIFTI-LOAD-ERROR] Not loadable by nibabel (expected .nii/.nii.gz): {mask_path}")
+			print(f"[NIFTI-LOAD-ERROR] {type(e).__name__}: {e}")
+			raise e
+
+		mask_file = self.mask_transform(mask_file.unsqueeze(0)).float()  # Add channel dimension for MONAI transforms
+
+
+
+		# return {'image': scan, 'brain_mask': mask_file,'org_scan': org_scan}  # Return original scan for debugging
+		out_dict = {
+			'image': scan, 'brain_mask': mask_file, 
+			'ImageUID': self.df.iloc[idx]['ImageUID'], 
+			'group': group,
+			'SubjectID': subject,
+			'class_emb': class_emb,
+			'fn': fn
+		}
+
+
+		return out_dict
 
 
 

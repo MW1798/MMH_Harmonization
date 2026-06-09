@@ -9,14 +9,14 @@ Email: mengqiw@unc.edu
 Date: 01/12/2026
 
 Reference:
-    This code accompanies the manuscript titled:
-    "Unified Multi-Site Multi-Sequence Brain MRI Harmonization Enriched by Biomedical Semantic Style" (Under Review)
+	This code accompanies the manuscript titled:
+	"Unified Multi-Site Multi-Sequence Brain MRI Harmonization Enriched by Biomedical Semantic Style" (Under Review)
 	
 	Please cite the preprint if you use this code: 
 	https://doi.org/10.48550/arXiv.2601.08193
 
 
-License: MIT License (see LICENSE file for details)
+License: Apache-2.0 License (see LICENSE file for details)
 """
 
 import os
@@ -24,6 +24,7 @@ os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 import shutil
 from pathlib import Path
 import datetime
+import argparse
 import MRIdata as MRI
 import numpy as np
 import torch
@@ -605,6 +606,97 @@ def train():
 
 
 if __name__ == "__main__":
+	parser = argparse.ArgumentParser(description="MMH Stage I: Sequence-Specific Global Harmonization")
+	
+	# Training parameters, loss weights tuned to balance loss contributions, you may adjust these as needed
+	parser.add_argument('--n_epochs', type=int, default=300, help='Number of epochs')
+	parser.add_argument('--bs', type=int, default=1, help='Batch size')
+	parser.add_argument('--accumulation_steps', type=int, default=4, help='Gradient accumulation steps, helpful for larger effective batch size with limited GPU memory')
+	parser.add_argument('--val_interval', type=int, default=10, help='Validation interval')
+	parser.add_argument('--lr_patience', type=int, default=2, help='Learning rate patience')
+	parser.add_argument('--noise_loss', type=str, default='l2', help='Type of noise loss')
+	parser.add_argument('--use_snr_weight', action='store_true', help='Use SNR weight') # default False in paper, can be enabled optionally to use snr weithed loss
+	parser.add_argument('--norm', type=str, default='AdaIN', help='Normalization layer, default AdaIN allows EMA injection')
+	parser.add_argument('--content_weight', type=float, default=1.0, help='Content loss weight')
+	parser.add_argument('--style_weight', type=float, default=10.0, help='Style loss weight')
+	parser.add_argument('--mean_std_weight', type=float, default=1.0, help='Mean/Std loss weight')
+	parser.add_argument('--peak_weight', type=float, default=1.0, help='Peak loss weight')
+	parser.add_argument('--EMA_alpha', type=float, default=0.90, help='EMA alpha for target histograms')
+	parser.add_argument('--rampup_epochs', type=int, default=20, help='Epochs to ramp up loss weights')
+	parser.add_argument('--t_threshold', type=int, default=100, help='Threshold for EMA update')
+	parser.add_argument('--condition_on', type=str, default='grad', help="Condition mode e.g., 'grad' (default) or 'none'")
+	
+	# Histogram parameters, generally no change needed
+	parser.add_argument('--disable_style_hist_01', action='store_true', help='Disable use of style hist in [0,1] range')
+	parser.add_argument('--hist_bins', type=int, default=100, help='Number of histogram bins')
+	parser.add_argument('--image_min', type=float, default=-1.0, help='Minimum value of input images')
+	parser.add_argument('--bin_width', type=float, default=0.01, help='Width of histogram bins')
+	parser.add_argument('--t2_sigma', type=float, default=1.5, help='Sigma for T2 in histogram')
+	parser.add_argument('--hist_sigma_multiplier', type=float, default=1.0, help='Multiplier for hist_sigma (multiplied by bin_width)')
+	
+	# DDIM Sampling parameters, generally no change needed
+	parser.add_argument('--disable_ddim_inference', action='store_true', help='Disable DDIM inference')
+	parser.add_argument('--DDIM_train', action='store_true', help='Use DDIM during training')
+	parser.add_argument('--disable_clip_sample', action='store_true', help='Disable clip_sample during training')
+	parser.add_argument('--num_train_ddim', type=int, default=50, help='Number of DDIM steps during training')
+	parser.add_argument('--num_inference_fdp', type=int, default=35, help='Number of inference FDP steps')
+	parser.add_argument('--num_inference_rdp', type=int, default=25, help='Number of inference RDP steps')
+	
+	# Debug parameters
+	parser.add_argument('--disable_save_script_snapshot', action='store_true', help='Do not save script snapshot')
+	parser.add_argument('--style_stats', action='store_true', help='Use style statistics')
+	parser.add_argument('--run_name', type=str, default='DEFINE_YOUR_RUN_NAME', help='Name of the current run')
+	
+	# Checkpoint and Paths, please set these before running
+	parser.add_argument('--Resume', action='store_true', help='Resume training from checkpoint')
+	parser.add_argument('--resume_from', type=str, default='PATH_TO_YOUR_CHECKPOINT.pth', help='Path to checkpoint to resume from')
+	parser.add_argument('--data_pt', type=str, default='PATH_TO_YOUR_DATA_DIRECTORY', help='Path to data directory')
+	parser.add_argument('--train_tsvs', nargs='+', default=['PATH_TO_TRAIN.tsv'], help='One or multiple paths to train tsv files')
+	parser.add_argument('--val_tsvs', nargs='+', default=['PATH_TO_VAL.tsv'], help='One or multiple paths to val tsv files')
+	parser.add_argument('--brain_mask', type=str, default='PATH_TO_YOUR_BRAIN_MASK_FILE.npy', help='Path to brain mask file')
+
+	args = parser.parse_args()
+
+	# Unpack args to variables used by the script
+	n_epochs = args.n_epochs
+	bs = args.bs
+	accumulation_steps = args.accumulation_steps
+	val_interval = args.val_interval
+	lr_patience = args.lr_patience
+	noise_loss = args.noise_loss
+	use_snr_weight = args.use_snr_weight
+	norm = args.norm
+	content_weight = args.content_weight
+	style_weight = args.style_weight
+	mean_std_weight = args.mean_std_weight
+	peak_weight = args.peak_weight
+	EMA_alpha = args.EMA_alpha
+	rampup_epochs = args.rampup_epochs
+	t_threshold = args.t_threshold
+	condition_on = args.condition_on if args.condition_on.lower() != 'none' else None
+	
+	use_style_hist_01 = not args.disable_style_hist_01
+	hist_bins = args.hist_bins
+	image_min = args.image_min
+	bin_width = args.bin_width
+	t2_sigma = args.t2_sigma
+	hist_sigma = bin_width * args.hist_sigma_multiplier
+	hist_ignore_bins = int(round(0.02 / bin_width))
+	
+	DDIM_inference = not args.disable_ddim_inference
+	DDIM_train = args.DDIM_train
+	clip_sample = not args.disable_clip_sample
+	num_train_ddim = args.num_train_ddim
+	num_inference_fdp = args.num_inference_fdp
+	num_inference_rdp = args.num_inference_rdp
+	
+	save_script_snapshot = not args.disable_save_script_snapshot
+	style_stats = args.style_stats
+	run_name = args.run_name
+	Resume = args.Resume
+	resume_from = Path(args.resume_from)
+	data_pt = Path(args.data_pt)
+
 	if torch.cuda.is_available():
 		device = torch.cuda.current_device()
 		print('Using CUDA: ',torch.cuda.get_device_name(device))
@@ -612,110 +704,38 @@ if __name__ == "__main__":
 		print("CUDA is not available.")
 	torch.cuda.empty_cache()
 
-	### training parameters
-	n_epochs = 300
-	bs = 1
-	accumulation_steps = 4 # effective batch size = batch size * accumulation_steps
-	val_interval = 10 
-	lr_patience = 2
-
-	noise_loss = 'l2'
-	use_snr_weight = False
-	norm = 'AdaIN'
-	content_weight = 1
-	style_weight = 10 
-	mean_std_weight = 1 
-	peak_weight = 1 
-	EMA_alpha = 0.95 
-	rampup_epochs = 20 
-	t_threshold = 100 # threshold for ema update
-	condition_on = 'grad' # 'grad' or None
-
-
-	### histogram parameters
-	use_style_hist_01 = True
-	hist_bins = 100
-	image_min = -1.0 # set the input image to [-1,1] range
-	bin_width = 0.01
-	t2_sigma = 1.5 
-	hist_sigma = bin_width
-	hist_ignore_bins = int(round(0.02 / bin_width))
-	
-
-	### DDIM Sampling parameters
-	DDIM_inference = True
-	DDIM_train = False
-	clip_sample = True
-	num_train_ddim = 50
-	num_inference_fdp = 35
-	num_inference_rdp = 25
-
-	### debug parameters
-	save_script_snapshot = True
-	style_stats = False
-
-
-
 	now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")
-	run_name = 'DEFINE_YOUR_RUN_NAME' 
-	
-
 	print(run_name)
 
-
-
-
-
-	Resume = False
 	if Resume:
-		resume_from = Path('PATH_TO_YOUR_CHECKPOINT.pth')  # specify your checkpoint path here
 		print(f'Resume from: {resume_from}')
 		save_dir = resume_from.parent
-		writer=SummaryWriter(f'TBLOG/{save_dir.name}')
+		writer = SummaryWriter(f'TBLOG/{save_dir.name}')
 	else:
 		epoch_start = 0
-		writer=SummaryWriter(f'TBLOG/{now}_{run_name}')
+		writer = SummaryWriter(f'TBLOG/{now}_{run_name}')
 		save_dir = Path(f'log/Stage1/{now}_{run_name}')
-  
+	
 	if not save_dir.exists():
 		os.makedirs(save_dir)
 	elif not Resume:
 		assert len(os.listdir(save_dir))==0,'Log dir exist!'
-  
-
-
 
 	# ############################## Define Dataset and DataLoader  ########################################################### 
-	data_pt = Path('PATH_TO_YOUR_DATA_DIRECTORY')  # specify your data path here
-
-	# combine source and target
-	lb_train_combined = pd.concat([
-									pd.read_csv('PATH_TO_TRAIN_T1.tsv',sep='\t'),
-									pd.read_csv('PATH_TO_TRAIN_T2.tsv',sep='\t')
-									])
+	lb_train_combined = pd.concat([pd.read_csv(tsv_path, sep='\t') for tsv_path in args.train_tsvs], ignore_index=True)
 	
-	lb_val_combined = pd.concat([
-								  pd.read_csv('PATH_TO_VAL_T1.tsv',sep='\t'),
-								  pd.read_csv('PATH_TO_VAL_T2.tsv',sep='\t')
-								  ])
+	lb_val_combined = pd.concat([pd.read_csv(tsv_path, sep='\t') for tsv_path in args.val_tsvs], ignore_index=True)
 	
-
-	train_dataset = MRI.DWITHP_t1t2(data_pt, lb_train_combined,image_min=image_min)
-	val_dataset = MRI.DWITHP_t1t2(data_pt, lb_val_combined,image_min=image_min)
-	train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=4, persistent_workers=True,drop_last=True)
-	val_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False, num_workers=4, persistent_workers=True,drop_last=True)
-	brain_mask = torch.from_numpy(np.load('PATH_TO_YOUR_BRAIN_MASK_FILE.npy')).unsqueeze(0).float().to(device) # (1,1,H,W,D)
-
-
+	train_dataset = MRI.DWITHP_t1t2(data_pt, lb_train_combined, image_min=image_min)
+	val_dataset = MRI.DWITHP_t1t2(data_pt, lb_val_combined, image_min=image_min)
+	train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=4, persistent_workers=True, drop_last=True)
+	val_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False, num_workers=4, persistent_workers=True, drop_last=True)
+	brain_mask = torch.from_numpy(np.load(args.brain_mask)).unsqueeze(0).float().to(device)
 
 	if len(train_loader) > 70:
 		save_temp_ckp = True
 	else:
 		save_temp_ckp = False
-
-
-
-
 
 	# define model
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -756,8 +776,6 @@ if __name__ == "__main__":
 		f.write(run_name+'\n')
 		f.write(parameters)
 
-	# Save a snapshot of the running script
-	# if not (Resume or val_only):
 	if save_script_snapshot:
 		try:
 			script_path = Path(__file__).resolve()

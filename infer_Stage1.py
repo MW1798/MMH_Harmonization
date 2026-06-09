@@ -15,14 +15,15 @@ Reference:
 	Please cite the preprint if you use this code: 
 	https://doi.org/10.48550/arXiv.2601.08193
 
-License: MIT License (see LICENSE file for details)
+License: Apache-2.0 License (see LICENSE file for details)
 """
 
 import os
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128"
 from pathlib import Path
 import datetime
-import data.MRIdata as MRI
+import argparse
+import MRIdata as MRI
 import numpy as np
 import torch
 import torchvision
@@ -175,7 +176,49 @@ def inference():
 
 
 if __name__ == '__main__':
-	bs = 4
+	parser = argparse.ArgumentParser(description="MMH Stage I Inference")
+		
+	parser.add_argument('--bs', type=int, default=4, help='Batch size')
+	parser.add_argument('--disable_save_volume', action='store_true', help='Disable saving volumes')
+	parser.add_argument('--save_sample', action='store_true', help='Enable saving samples')
+	parser.add_argument('--save_intermediate', action='store_true', help='Enable saving intermediate results')
+	parser.add_argument('--norm', type=str, default='AdaIN', help='Normalization string')
+	parser.add_argument('--condition_on', type=str, default='grad', help='Condition on: grad or none')
+	parser.add_argument('--image_min', type=float, default=-1.0, help='Image min value')
+	parser.add_argument('--sch', type=str, default='DDIM', help='Scheduler type: DDIM or DDPM')
+	parser.add_argument('--num_train_ddim', type=int, default=50, help='Num train DDIM steps')
+	parser.add_argument('--num_inference_fdp', type=int, default=35, help='Num inference FDP steps')
+	parser.add_argument('--num_inference_rdp', type=int, default=25, help='Num inference RDP steps')
+	parser.add_argument('--ddpm_step', type=int, default=100, help='DDPM steps')
+	parser.add_argument('--run_name', type=str, default='DEFINE_YOUR_RUN_NAME', help='Run name')
+	parser.add_argument('--save_dir', type=str, default='PATH_TO_SAVE_INFERENCE_RESULTS', help='Path to save inference results')
+	parser.add_argument('--resume', action='store_true', help='Resume inference')
+	parser.add_argument('--resume_dir', type=str, default='PATH_TO_SAVE_INFERENCE_RESULTS', help='Resume directory')
+	parser.add_argument('--data_pt', type=str, default='PATH_TO_YOUR_DATA_DIRECTORY', help='Path to data directory')
+	parser.add_argument('--test_tsvs', nargs='+', default=['PATH_TO_TEST_T1.tsv', 'PATH_TO_TEST_T2.tsv'], help='One or multiple paths to test TSV files')
+	parser.add_argument('--brain_mask', type=str, default='PATH_TO_YOUR_BRAIN_MASK_FILE.npy', help='Path to brain mask')
+	parser.add_argument('--stage1_model', type=str, default='PATH_TO_BEST_STAGE1_CKP.pth', help='Path to Stage 1 checkpoint')
+
+	args = parser.parse_args()
+
+	bs = args.bs
+	save_volume = not args.disable_save_volume
+	save_sample = args.save_sample
+	save_intermediate = args.save_intermediate
+	norm = args.norm
+	condition_on = args.condition_on if args.condition_on.lower() != 'none' else None
+	image_min = args.image_min
+	sch = args.sch
+	num_train_ddim = args.num_train_ddim
+	num_inference_fdp = args.num_inference_fdp
+	num_inference_rdp = args.num_inference_rdp
+	ddpm_step = args.ddpm_step
+	run_name = args.run_name
+	save_dir = Path(args.save_dir)
+	resume = args.resume
+	resume_dir = Path(args.resume_dir)
+	data_pt = Path(args.data_pt)
+
 	if torch.cuda.is_available():
 		device = torch.cuda.current_device()
 		print('Using CUDA: ',torch.cuda.get_device_name(device))
@@ -184,41 +227,12 @@ if __name__ == '__main__':
 	torch.cuda.empty_cache()
 
 	now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")
-
-
 	
-
-
-	save_volume = True
-	save_sample = False
-	save_intermediate = False
-
-	norm = 'AdaIN'
-	condition_on = 'grad'  # grad or None
-
-	image_min = -1
-
- 
-	sch = 'DDIM'
-
-	num_train_ddim = 50
-	num_inference_fdp = 35
-	num_inference_rdp = 25
- 
-	ddpm_step = 100
-
-	run_name = 'DEFINE_YOUR_RUN_NAME' 
-	
-
 	print(run_name)
 
-	save_dir = Path(f'PATH_TO_SAVE_INFERENCE_RESULTS')
-
-	resume = False
 	if resume:
-		resume_dir = Path(f'PATH_TO_SAVE_INFERENCE_RESULTS')
 		save_dir = resume_dir
-		print(f'Resuem inference, find {len(os.listdir(save_dir))} files')
+		print(f'Resume inference, find {len(os.listdir(save_dir))} files')
 		resume_fn_list = [f.replace('_recon.npy','') for f in os.listdir(save_dir)] 
 
 	elif not save_dir.exists():
@@ -227,23 +241,16 @@ if __name__ == '__main__':
 		assert len(os.listdir(save_dir))==0,'Log dir exist!'
 
 	############################## Define Dataset and DataLoader  ########################################################### 
-	data_pt = Path('PATH_TO_YOUR_DATA_DIRECTORY')  # specify your data path here
-
-	# combine source and target
 	
-	lb_test_combined = pd.concat([
-								  pd.read_csv('PATH_TO_TEST_T1.tsv',sep='\t'),
-								  pd.read_csv('PATH_TO_TEST_T2.tsv',sep='\t')
-								  ])
+	# combine tsv sources
+	lb_test_combined = pd.concat([pd.read_csv(tsv_path, sep='\t') for tsv_path in args.test_tsvs], ignore_index=True)
 
 	test_dataset = MRI.DWITHP_t1t2(data_pt, lb_test_combined,image_min=image_min)
 	test_loader = DataLoader(test_dataset, batch_size=bs, shuffle=False, num_workers=4, persistent_workers=True,drop_last=True)
-	brain_mask = torch.from_numpy(np.load('PATH_TO_YOUR_BRAIN_MASK_FILE.npy')).unsqueeze(0).float().to(device) # (1,1,H,W,D)
-
+	brain_mask = torch.from_numpy(np.load(args.brain_mask)).unsqueeze(0).float().to(device) # (1,1,H,W,D)
 		
-
 	#### load pth
-	DDPM_pt = torch.load(f'PATH_TO_BEST_STAGE1_CKP.pth') # load the best stage1 checkpoint
+	DDPM_pt = torch.load(args.stage1_model) # load the best stage1 checkpoint
 
 
 	unet = DiffusionModelUNet(

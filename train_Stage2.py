@@ -15,7 +15,7 @@ Reference:
 	Please cite the preprint if you use this code: 
 	https://doi.org/10.48550/arXiv.2601.08193
 
-License: MIT License (see LICENSE file for details)
+License: Apache-2.0 License (see LICENSE file for details)
 """
 
 import os
@@ -24,6 +24,7 @@ import shutil
 import sys
 from pathlib import Path
 import datetime
+import argparse
 import data.MRIdata as MRI
 import numpy as np
 import torch
@@ -1362,6 +1363,116 @@ def load_ckp(ckp_dir, which_load):
 
 
 if __name__ == "__main__":
+	parser = argparse.ArgumentParser(description="MMH Stage II: Target-Specific Fine Harmonization")
+
+	# Run parameters
+	parser.add_argument('--run_name', type=str, default='DEFINE_YOUR_RUN_NAME_HERE', help='Run name')
+	parser.add_argument('--epoch_total', type=int, default=30, help='Total epochs')
+	parser.add_argument('--Resume', action='store_true', help='Resume from checkpoint')
+	parser.add_argument('--val_only', action='store_true', help='Run validation only')
+	parser.add_argument('--resume_from', type=str, default='PATH_TO_CKP_DIR', help='Path to checkpoint dir for resuming')
+	parser.add_argument('--val_dir', type=str, default='PATH_TO_VAL_DIR', help='Path to validation directory')
+	
+	# Sampling / Inference parameters
+	parser.add_argument('--num_train_ddim', type=int, default=50)
+	parser.add_argument('--num_inference_fdp', type=int, default=35)
+	parser.add_argument('--num_inference_rdp', type=int, default=25)
+
+	# Training setup
+	parser.add_argument('--bs', type=int, default=4)
+	parser.add_argument('--image_min', type=float, default=-1.0)
+	parser.add_argument('--disable_use_mask', action='store_true')
+	parser.add_argument('--disable_save_sample', action='store_true')
+	parser.add_argument('--disable_save_ckp', action='store_true')
+	parser.add_argument('--grad_loss_type', type=str, default='l1')
+	parser.add_argument('--norm', type=str, default='AdaIN')
+	parser.add_argument('--condition_on', type=str, default='grad')
+
+	# Weights and Schedule
+	parser.add_argument('--weight_sr', type=float, default=1.0)
+	parser.add_argument('--sd_floor', type=float, default=1.0)
+	parser.add_argument('--weight_sd_max', type=float, default=5.0)
+	parser.add_argument('--sd_ramp_epochs', type=int, default=8)
+	parser.add_argument('--weight_dir', type=float, default=1.0)
+	parser.add_argument('--weight_mag', type=float, default=1.5)
+	parser.add_argument('--weight_preceptual', type=float, default=0.0)
+	parser.add_argument('--perceptual_internal_scale', type=float, default=1.0)
+	parser.add_argument('--weight_grad', type=float, default=0.5)
+	parser.add_argument('--freeze_agg_epochs', type=int, default=0)
+	parser.add_argument('--warmup_epochs', type=int, default=2)
+	parser.add_argument('--adv_floor', type=float, default=0.0) # experimental, not used in current version
+	parser.add_argument('--weight_adv_max', type=float, default=0.0)
+	parser.add_argument('--adv_ramp_start_offset', type=int, default=0)
+	parser.add_argument('--adv_ramp_duration', type=int, default=15)
+
+	# CLIP
+	parser.add_argument('--which_clip', type=str, default='BiomedCLIP')
+	parser.add_argument('--ignore_slices', type=int, default=50)
+	parser.add_argument('--max_CLIP_slices', type=int, default=24)
+
+	# LRs
+	parser.add_argument('--initial_lr', type=float, default=5e-7)
+	parser.add_argument('--initial_lr_d', type=float, default=1e-7)
+	parser.add_argument('--initial_slice_aggregator_lr', type=float, default=6e-7)
+
+	# Paths & Data
+	parser.add_argument('--Stage1_pt', type=str, default='PATH_TO_STAGE1_PRETRAINED_MODEL/stage1_model.pth')
+	parser.add_argument('--data_pt', type=str, default='PATH_TO_TRAIN_DATA_DIR')
+	parser.add_argument('--data_pt_val', type=str, default='PATH_TO_VAL_DATA_DIR')
+	parser.add_argument('--target_site', type=str, default='UCI', help='Target site identifier used in filenames')
+	parser.add_argument('--train_tsvs', nargs='+', default=['PATH_TO_TRAIN_T1.tsv', 'PATH_TO_TRAIN_T2.tsv'])
+	parser.add_argument('--val_tsvs', nargs='+', default=['PATH_TO_VAL_T1.tsv', 'PATH_TO_VAL_T2.tsv'])
+	parser.add_argument('--brain_mask', type=str, default='PATH_TO_BRAIN_MASK_FILE.npy')
+	
+	# Parse args
+	args = parser.parse_args()
+
+	# Unpack args
+	num_train_ddim = args.num_train_ddim
+	num_inference_fdp = args.num_inference_fdp
+	num_inference_rdp = args.num_inference_rdp
+	run_name = args.run_name
+	epoch_total = args.epoch_total
+	Resume = args.Resume
+	val_only = args.val_only
+	bs = args.bs
+	image_min = args.image_min
+	use_mask = not args.disable_use_mask
+	save_sample = not args.disable_save_sample
+	save_ckp = not args.disable_save_ckp
+	grad_loss_type = args.grad_loss_type
+	norm = args.norm
+	condition_on = args.condition_on if args.condition_on.lower() != 'none' else None
+	weight_sr = args.weight_sr
+	sd_floor = args.sd_floor
+	weight_sd_max = args.weight_sd_max
+	sd_ramp_epochs = args.sd_ramp_epochs
+	weight_dir = args.weight_dir
+	weight_mag = args.weight_mag
+	weight_preceptual = args.weight_preceptual
+	perceptual_internal_scale = args.perceptual_internal_scale
+	weight_grad = args.weight_grad
+	freeze_agg_epochs = args.freeze_agg_epochs
+	warmup_epochs = args.warmup_epochs
+	adv_floor = args.adv_floor
+	weight_adv_max = args.weight_adv_max
+	adv_ramp_start = sd_ramp_epochs + args.adv_ramp_start_offset
+	adv_ramp_end = adv_ramp_start + args.adv_ramp_duration
+	which_clip = args.which_clip
+	ignore_slices = args.ignore_slices
+	max_CLIP_slices = args.max_CLIP_slices
+	initial_lr = args.initial_lr
+	initial_lr_d = args.initial_lr_d
+	initial_slice_aggregator_lr = args.initial_slice_aggregator_lr
+	Stage1_pt = args.Stage1_pt
+	target_site = args.target_site
+
+	FINAL_K_SR = 10          # style_recon_DDIM final-K window
+	FINAL_K_ST = 10          # CLIP_style_DDIM final-K window
+	SR_MODE = "last_k" # options: "per_t" (old), "last_k"
+	ST_MODE = "last_k" # options: "per_t" (old), "last_k"
+	EMA_freeze_epochs = -1
+	EMA_alpha = 0.8
 
 	if torch.cuda.is_available():
 		device = torch.device("cuda:0") 
@@ -1374,31 +1485,19 @@ if __name__ == "__main__":
 	##############################################
 
 	now = datetime.datetime.now().strftime("%Y-%m-%dT%H-%M")
-
-
-	num_train_ddim = 50 
-	num_inference_fdp = 35
-	num_inference_rdp = 25  
-
-
-	run_name = f'DEFINE_YOUR_RUN_NAME_HERE'  
 	print(f'{now}_{run_name}')
 
 	epoch_start = 0
-	epoch_total = 30
-
-	Resume = False
-	val_only = False
 
 	if val_only:
-		resume_from = Path('PATH_TO_VAL_DIR')
+		resume_from = Path(args.val_dir)
 		print(f'{"#"*20}Validation from: {resume_from} {"#"*20}')
 		save_dir = resume_from.parent
 		model_ckp_dir = save_dir / 'model_ckp'
 		if model_ckp_dir.exists():
 			ckp, epoch_start = load_ckp(model_ckp_dir, 32)  
 	elif Resume:
-		resume_from = Path('PATH_TO_CKP_DIR')
+		resume_from = Path(args.resume_from)
 		print(f'Resume from: {resume_from}')
 		save_dir = resume_from.parent
 		writer=SummaryWriter(f'runs/{save_dir.name}')
@@ -1420,83 +1519,16 @@ if __name__ == "__main__":
 	elif not (Resume or val_only):
 		assert len(os.listdir(save_dir))==0,'Log dir exist!'
 
-
-	############## define hyperparameters ############
-	bs = 4
-
-	FINAL_K_SR = 10          # style_recon_DDIM final-K window
-	FINAL_K_ST = 10          # CLIP_style_DDIM final-K window
-	SR_MODE = "last_k" # options: "per_t" (old), "last_k"
-	ST_MODE = "last_k" # options: "per_t" (old), "last_k"
-
-
-	image_min = -1.0
-	use_mask = True
-	save_sample = True
-	save_ckp = True
-	grad_loss_type = 'l1' 
-	norm = 'AdaIN'
-	condition_on = 'grad'
-	
-	weight_sr = 1       
-
-	sd_floor = 1 
-	weight_sd_max = 5 
-	sd_ramp_epochs = 8        
-
-	weight_dir = 1     
-	weight_mag = 1.5 
-	weight_preceptual = 0 # optinal, not used in main experiments
-	perceptual_internal_scale = 1 
-	weight_grad = 0.5 
-
-	freeze_agg_epochs =  0       
-	warmup_epochs = 2 
-	EMA_freeze_epochs = -1
-
-	adv_floor = 0.0			# optinal, not used in main experiments    
-	weight_adv_max = 0.0  # optinal, not used in main experiments       
-	adv_ramp_start = sd_ramp_epochs 
-	adv_ramp_end = adv_ramp_start + 15  
-
-	EMA_alpha = 0.8
-
-	which_clip='BiomedCLIP'  ### used in main experiments
-	ignore_slices = 50
-	max_CLIP_slices = 24
-
-
-
-
-	initial_lr = 5e-7 
-	initial_lr_d = 1e-7 
-	initial_slice_aggregator_lr = 6e-7
-
-
-	
-	Stage1_pt = 'PATH_TO_STAGE1_PRETRAINED_MODEL/stage1_model.pth'
-
 	LDM_pt_file = torch.load(Stage1_pt)
 
-
-
-	
 	#################################### Define Dataloader ################################################################
-	data_pt = Path('PATH_TO_TRAIN_DATA_DIR')
-	data_pt_val = Path('PATH_TO_VAL_DATA_DIR')
-
-	target_site = 'UCI' # define target site
+	data_pt = Path(args.data_pt)
+	data_pt_val = Path(args.data_pt_val)
 
 	# combine source and target
-	lb_train_src_tar_t1t2_combined = pd.concat([
-									pd.read_csv('PATH_TO_TRAIN_T1.tsv',sep='\t'),
-									pd.read_csv('PATH_TO_TRAIN_T2.tsv',sep='\t')
-									])
+	lb_train_src_tar_t1t2_combined = pd.concat([pd.read_csv(tsv_path, sep='\t') for tsv_path in args.train_tsvs], ignore_index=True)
 	
-	lb_val_src_tar_t1t2_combined = pd.concat([
-									pd.read_csv('PATH_TO_VAL_T1.tsv',sep='\t'),
-									pd.read_csv('PATH_TO_VAL_T2.tsv',sep='\t')
-									])
+	lb_val_src_tar_t1t2_combined = pd.concat([pd.read_csv(tsv_path, sep='\t') for tsv_path in args.val_tsvs], ignore_index=True)
 
 		
 	lb_train_tar = lb_train_src_tar_t1t2_combined[lb_train_src_tar_t1t2_combined['site'] == target_site]
@@ -1511,7 +1543,7 @@ if __name__ == "__main__":
 	val_dataset = MRI.DWITHP_t1t2(data_pt_val, lb_val_src_tar_t1t2_combined, lb_val_tar_t1, lb_val_tar_t2, image_min=image_min)
 	train_loader = DataLoader(train_dataset, batch_size=bs, shuffle=True, num_workers=4, persistent_workers=True,drop_last=False)
 	val_loader = DataLoader(val_dataset, batch_size=bs, shuffle=False, num_workers=4, persistent_workers=True,drop_last=False)
-	brain_mask = torch.from_numpy(np.load('PATH_TO_BRAIN_MASK_FILE.npy')).unsqueeze(0).float().to(device) # (1,1,144,184,184)
+	brain_mask = torch.from_numpy(np.load(args.brain_mask)).unsqueeze(0).float().to(device) # (1,1,144,184,184)
 
 
 

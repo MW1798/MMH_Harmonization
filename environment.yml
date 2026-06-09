@@ -1,4 +1,4 @@
-name: my_paper_env
+name: MMH_env
 channels:
   - pytorch
   - nvidia
